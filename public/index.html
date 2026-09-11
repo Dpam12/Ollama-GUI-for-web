@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ollama GUI</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦙</text></svg>">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-avatar">🦙</div>
+        <div class="brand-text">
+          <span class="brand-name">Ollama&nbsp;Studio</span>
+          <span class="brand-sub">local AI workspace</span>
+        </div>
+      </div>
+
+      <button id="btnNewChat" class="new-chat">
+        <svg viewBox="0 0 24 24" class="icon"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span>New chat</span>
+        <kbd>Ctrl+N</kbd>
+      </button>
+
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" class="icon"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+        <input id="searchInput" type="search" placeholder="Search chats…  Ctrl+K" autocomplete="off">
+      </div>
+
+      <div class="list-head">
+        <span>Chats</span>
+        <span id="convCount" class="count"></span>
+      </div>
+      <nav id="convList" aria-label="Conversations"></nav>
+
+      <div class="sidebar-foot">
+        <div id="conn" class="conn">
+          <span class="dot"></span>
+          <span id="connText">connecting…</span>
+          <span id="memBadge" class="count" title="Memory entries"></span>
+        </div>
+        <div class="foot-nav">
+          <button id="btnModels" class="btn btn-ghost foot-btn" title="Manage models">
+            <svg viewBox="0 0 24 24" class="icon"><path d="M20 7h-9l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/></svg>
+            <span>Models</span>
+          </button>
+          <button id="btnMemory" class="btn btn-ghost foot-btn" title="Memory & knowledge">
+            <svg viewBox="0 0 24 24" class="icon"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            <span>Memory</span>
+          </button>
+          <button id="btnSettings" class="btn btn-ghost foot-btn" title="Settings">
+            <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <span>Settings</span>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="topbar">
+        <div class="top-left">
+          <button id="btnMenu" class="btn btn-ghost icon-only" title="Toggle sidebar">☰</button>
+          <div class="model-picker">
+            <div class="model-pick-icon">
+              <svg viewBox="0 0 24 24" class="icon"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+            </div>
+            <label class="model-pick-inner">
+              <span>Model</span>
+              <select id="modelSelect" title="Current model"></select>
+            </label>
+            <button id="btnModelsTop" class="btn btn-ghost icon-only" title="Manage models">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M12 6v6m0 6V12m0 0h-6m6 0h6"/></svg>
+            </button>
+          </div>
+          <button id="btnConnPill" class="conn-pill" title="Connection → click for settings">
+            <span id="pillDot" class="dot"></span>
+            <span id="pillText">…</span>
+          </button>
+          <button id="btnChatSettings" class="btn btn-ghost icon-only" title="Generation settings">
+            <svg viewBox="0 0 24 24" class="icon"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>
+          </button>
+        </div>
+        <div class="top-right">
+          <button id="btnExport" class="btn btn-ghost icon-only" title="Export all data">
+            <svg viewBox="0 0 24 24" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+          <button id="btnImport" class="btn btn-ghost icon-only" title="Import data">
+            <svg viewBox="0 0 24 24" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </button>
+          <label class="theme-toggle" title="Toggle theme">
+            <input type="checkbox" id="themeToggle">
+            <span class="theme-track"></span>
+          </label>
+        </div>
+      </header>
+
+      <div id="chatArea">
+        <div id="emptyState" class="empty">
+          <div class="empty-logo">🦙</div>
+          <h1>Talk to your local models</h1>
+          <p>Streaming replies, markdown, model management, chat history — and a memory that learns your preferences from every conversation.</p>
+          <div id="quickStart" class="quick-chips"></div>
+        </div>
+        <div id="chat" role="log" aria-live="polite"></div>
+        <div id="chatBottom"></div>
+      </div>
+
+      <footer id="composerWrap">
+        <div id="composerChip"></div>
+        <form id="composer" autocomplete="off">
+          <textarea id="input" rows="1" placeholder="Message your model…  (Ctrl+Enter to send)" spellcheck="false"></textarea>
+          <div class="composer-bar">
+            <div class="composer-hints">
+              <span id="genInd" class="gen-ind hidden">
+                <span class="gen-dot"></span><span class="gen-dot"></span><span class="gen-dot"></span>
+                <em>generating</em>
+              </span>
+              <span id="modelChip" class="chip-inline"></span>
+              <span id="ctxChip" class="muted"></span>
+              <span id="statChip" class="muted"></span>
+            </div>
+            <div class="composer-actions">
+              <span class="kbd-hint">Esc stops</span>
+              <button id="btnStop" class="btn btn-danger hidden" title="Stop (Esc)">■ Stop</button>
+              <button id="btnSend" class="send-btn" title="Send (Ctrl+Enter)">
+                <svg viewBox="0 0 24 24" class="icon"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              </button>
+            </div>
+          </div>
+        </form>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Modals -->
+  <div id="modalLayer" class="layer hidden"></div>
+
+  <div id="modalChatSettings" class="modal-wrap hidden" role="dialog" aria-label="Generation settings">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <h2><span class="modal-emoji">⚡</span> Generation settings</h2>
+        <button class="btn btn-ghost X" data-close="modalChatSettings">✕</button>
+      </div>
+      <div class="settings-body chat-settings-body">
+
+        <div class="panel param-panel">
+          <h3><svg viewBox="0 0 24 24" class="icon icon-mini"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg> Generation</h3>
+          <div class="param" data-key="temperature">
+            <div class="param-head"><span>Temperature</span><output>0.8</output></div>
+            <input type="range" min="0" max="2" step="0.05">
+          </div>
+          <div class="param" data-key="top_p">
+            <div class="param-head"><span>Top-P</span><output>0.9</output></div>
+            <input type="range" min="0" max="1" step="0.05">
+          </div>
+          <div class="param" data-key="top_k">
+            <div class="param-head"><span>Top-K</span><output>40</output></div>
+            <input type="range" min="0" max="100" step="1">
+          </div>
+          <div class="param" data-key="num_ctx">
+            <div class="param-head"><span>Context</span><output>4096</output></div>
+            <input type="range" min="512" max="32768" step="512">
+          </div>
+          <div class="param" data-key="seed">
+            <div class="param-head"><span>Seed</span><output>random</output></div>
+            <input type="range" min="0" max="100000" step="1">
+          </div>
+        </div>
+
+        <div class="panel param-panel">
+          <div class="panel-head">
+            <h3><svg viewBox="0 0 24 24" class="icon icon-mini"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> System prompt</h3>
+            <button class="btn btn-ghost btn-xs" id="btnClearSystem">clear</button>
+          </div>
+          <p class="modal-hint">Optional instructions that apply to every message in this chat.</p>
+          <textarea id="systemInput" rows="4" placeholder="e.g. You are a concise, technical assistant…"></textarea>
+        </div>
+
+        <div class="panel param-panel">
+          <label class="check-row">
+            <input type="checkbox" id="useMemory" checked>
+            <span>
+              <b>Use memory</b><br>
+              <small>Injects learned facts + notes from the Memory tab into context</small>
+            </span>
+          </label>
+          <p class="modal-hint">Tune temperature, top-k and context length for this chat. Changes save as you adjust.</p>
+        </div>
+
+      </div>
+      <div class="modal-foot">
+        <p class="foot-note"><span class="muted">Per-chat settings</span></p>
+        <button class="btn btn-ghost" data-close="modalChatSettings">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modalModels" class="modal-wrap hidden" role="dialog" aria-label="Model manager">
+    <div class="modal">
+      <div class="modal-head">
+        <h2><span class="modal-emoji">🧠</span> Models</h2>
+        <button class="btn btn-ghost X" data-close="modalModels">✕</button>
+      </div>
+      <div class="model-toolbar">
+        <form id="pullForm">
+          <input id="pullName" placeholder="e.g. llama3.2 · qwen2.5:7b · mistral" autocomplete="off">
+          <button class="btn btn-primary" type="submit">Pull</button>
+        </form>
+      </div>
+      <div id="pullProgress" class="hidden"><div class="progress"><div id="pullBar"></div></div><div id="pullStatus" class="muted"></div></div>
+      <div id="modelList" class="model-list"></div>
+    </div>
+  </div>
+
+  <div id="modalModelDetail" class="modal-wrap hidden" role="dialog" aria-label="Model details">
+    <div class="modal modal-sm">
+      <div class="modal-head"><h2 id="detailTitle">Model</h2><button class="btn btn-ghost X" data-close="modalModelDetail">✕</button></div>
+      <div id="detailBody" class="detail-body"></div>
+    </div>
+  </div>
+
+  <div id="modalMemory" class="modal-wrap hidden" role="dialog" aria-label="Memory">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <h2><span class="modal-emoji">🧠</span> Memory &amp; knowledge</h2>
+        <div class="head-actions">
+          <label class="check-row" title="Automatically learn facts from your conversations">
+            <input type="checkbox" id="autoMemory"> <span>Auto-learn</span>
+          </label>
+          <button class="btn btn-ghost X" data-close="modalMemory">✕</button>
+        </div>
+      </div>
+      <div class="tabs-bar memory-tabs">
+        <button class="tab active" data-tab="notes">Your notes</button>
+        <button class="tab" data-tab="learned">Learned <span id="learnedCount"></span></button>
+      </div>
+      <form id="memoryForm" class="memory-form">
+        <input id="memoryText" placeholder="Teach it something, e.g. 'I prefer concise technical answers.'" autocomplete="off">
+        <input id="memoryTags" placeholder="tags (optional)" autocomplete="off">
+        <button class="btn btn-primary" type="submit">Remember</button>
+      </form>
+      <div id="memoryList" class="memory-list"></div>
+    </div>
+  </div>
+
+  <div id="modalSettings" class="modal-wrap hidden" role="dialog" aria-label="Settings">
+    <div class="modal modal-lg">
+      <div class="modal-head">
+        <h2><span class="modal-emoji">⚙️</span> Settings</h2>
+        <button class="btn btn-ghost X" data-close="modalSettings">✕</button>
+      </div>
+      <div class="tabs-bar settings-tabs">
+        <button class="tab active" data-sect="general">General</button>
+        <button class="tab" data-sect="web">Web address</button>
+        <button class="tab" data-sect="data">Data</button>
+      </div>
+      <div class="settings-body">
+
+        <div class="tab-section active" data-sect="general">
+          <label class="field">
+            <span>Appearance</span>
+            <div class="seg">
+              <button type="button" class="seg-btn" data-theme-v="dark">🌙 Dark</button>
+              <button type="button" class="seg-btn" data-theme-v="light">☀️ Light</button>
+            </div>
+          </label>
+          <label class="check-row"><input type="checkbox" id="setAutoTitle"><span><b>Auto-title new chats</b><br><small>Name conversations from their first message</small></span></label>
+          <label class="check-row"><input type="checkbox" id="setAutoMemory"><span><b>Auto-learn from conversations</b><br><small>Extract durable facts about you and store them in memory</small></span></label>
+        </div>
+
+        <div class="tab-section" data-sect="web">
+          <label class="field">
+            <span>Server address</span>
+            <input id="setHost" placeholder="127.0.0.1" spellcheck="false">
+            <div class="preset-row">
+              <button type="button" class="chip" data-host="127.0.0.1">🔒 Local only</button>
+              <button type="button" class="chip" data-host="0.0.0.0">🌐 LAN (any device)</button>
+            </div>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>Port</span>
+              <input id="setPort" type="number" placeholder="8899">
+            </label>
+            <label class="field">
+              <span>Public / custom URL</span>
+              <input id="setCustomUrl" placeholder="e.g. https://model.example.com" spellcheck="false">
+            </label>
+          </div>
+          <label class="field">
+            <span>Ollama server URL</span>
+            <input id="setOllamaBase" placeholder="http://127.0.0.1:11434" spellcheck="false">
+          </label>
+          <label class="field">
+            <span>Access token</span>
+            <input id="setToken" type="password" placeholder="optional — protects LAN access" autocomplete="new-password">
+          </label>
+          <div class="url-card">
+            <div class="url-head">🔗 Where to reach this GUI</div>
+            <div class="url-row" id="urlLocalRow">
+              <span class="url-label">Local</span>
+              <input id="urlLocal" readonly>
+              <button class="btn btn-ghost btn-xs copy-url" data-target="urlLocal">Copy</button>
+            </div>
+            <div class="url-row" id="urlLanRow">
+              <span class="url-label">Network</span>
+              <input id="urlLan" readonly>
+              <button class="btn btn-ghost btn-xs copy-url" data-target="urlLan">Copy</button>
+            </div>
+            <div class="url-row" id="urlCustomRow">
+              <span class="url-label">Custom</span>
+              <input id="urlCustom" readonly>
+              <button class="btn btn-ghost btn-xs copy-url" data-target="urlCustom">Copy</button>
+            </div>
+            <p class="hint" id="needsTokenHint" style="display:none">🔒 Access token is set — visitors will need it.</p>
+            <p class="hint warn" id="urlWarn" style="display:none">⚠️ Custom URL is set but the server is bound to Local only — other devices cannot reach it. Switch Server address to “LAN” and Save.</p>
+            <p class="hint">Host/port changes restart the server. Choose “LAN” to reach it from your phone or other devices.</p>
+          </div>
+        </div>
+
+        <div class="tab-section" data-sect="data">
+          <div class="data-actions">
+            <button class="btn" id="btnExportBig">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Export everything (JSON backup)
+            </button>
+            <button class="btn" id="btnImportBig">
+              <svg viewBox="0 0 24 24" class="icon"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Import from backup
+            </button>
+            <button class="btn btn-danger" id="btnResetData">
+              <svg viewBox="0 0 24 24" class="icon"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Delete all chats &amp; memory
+            </button>
+          </div>
+          <p class="hint">Exports include every conversation and all memory. Backups are plain JSON — easy to read and safe to store.</p>
+        </div>
+
+      </div>
+      <div class="modal-foot">
+        <p class="foot-note"><span id="restartNote" class="hidden">⚡ Restarts on save</span></p>
+        <button class="btn btn-ghost" data-close="modalSettings">Cancel</button>
+        <button class="btn btn-primary" id="btnSaveSettings">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modalLogin" class="modal-wrap hidden" role="dialog" aria-label="Login">
+    <div class="modal modal-sm">
+      <div class="modal-head"><h2><span class="modal-emoji">🔒</span> Access token required</h2></div>
+      <div class="modal-body">
+        <label class="field">
+          <span>Token</span>
+          <input id="loginToken" type="password" autocomplete="current-password">
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-primary" id="btnLogin">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts"></div>
+  <input type="file" id="fileInput" accept=".json,application/json" class="hidden">
+  <script src="/app.js"></script>
+</body>
+</html>

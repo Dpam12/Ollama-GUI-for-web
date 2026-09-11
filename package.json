@@ -1,0 +1,14 @@
+{
+  "name": "ollama-gui",
+  "version": "1.0.0",
+  "description": "Advanced self-contained local + web GUI for Ollama. No dependencies.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "lan": "node server.js --host 0.0.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
