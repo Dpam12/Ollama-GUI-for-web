@@ -110,3 +110,5 @@ All `/api/*` endpoints require the access token if one is set (via `Authorizatio
 ## License
 
 MIT
+
+*This code and description was written with AI*
