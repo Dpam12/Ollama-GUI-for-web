@@ -1,7 +1,7 @@
 {
   "name": "ollama-gui",
-  "version": "1.0.0",
-  "description": "Advanced self-contained local + web GUI for Ollama. No dependencies.",
+  "version": "2.0.0",
+  "description": "Advanced self-contained local + web GUI for Ollama. Brain-routed images, agentic coding mode, zero dependencies.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

@@ -74,6 +74,10 @@
               <svg viewBox="0 0 24 24" class="icon"><path d="M12 6v6m0 6V12m0 0h-6m6 0h6"/></svg>
             </button>
           </div>
+          <div class="mode-seg" role="tablist" aria-label="Mode">
+            <button id="modeChat" class="seg-btn active" role="tab">💬 Chat</button>
+            <button id="modeAgent" class="seg-btn" role="tab">🤖 Agent</button>
+          </div>
           <button id="btnConnPill" class="conn-pill" title="Connection → click for settings">
             <span id="pillDot" class="dot"></span>
             <span id="pillText">…</span>
@@ -118,6 +122,7 @@
                 <em>generating</em>
               </span>
               <span id="modelChip" class="chip-inline"></span>
+              <span id="agentChip" class="chip-inline hidden"></span>
               <span id="ctxChip" class="muted"></span>
               <span id="statChip" class="muted"></span>
             </div>
@@ -130,6 +135,13 @@
             </div>
           </div>
         </form>
+      </footer>
+
+      <footer id="bottomBar">
+        <button id="btnSettingsBottom" class="btn" title="Settings">
+          <svg viewBox="0 0 24 24" class="icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          Settings
+        </button>
       </footer>
     </main>
   </div>
@@ -268,6 +280,20 @@
           </label>
           <label class="check-row"><input type="checkbox" id="setAutoTitle"><span><b>Auto-title new chats</b><br><small>Name conversations from their first message</small></span></label>
           <label class="check-row"><input type="checkbox" id="setAutoMemory"><span><b>Auto-learn from conversations</b><br><small>Extract durable facts about you and store them in memory</small></span></label>
+          <label class="field">
+            <span>Image model</span>
+            <input id="setImageModel" placeholder="e.g. z-image (auto-detect)" spellcheck="false">
+          </label>
+          <label class="field">
+            <span>Default chat models</span>
+            <input id="setDefaultModels" placeholder="e.g. qwen2.5, llama3.2 — comma separated" spellcheck="false">
+            <small>Automatically selects the first installed default; lists missing ones under Recommended in Models.</small>
+          </label>
+          <label class="field">
+            <span>Agent workspace (folder)</span>
+            <input id="setWorkspace" placeholder="~/Ollama_Code_Output" spellcheck="false">
+            <small><b>Agent mode</b> runs shell commands and reads/writes files inside this folder; it is auto-created, and empty uses <code>~/Ollama_Code_Output</code>. Dependencies found in the project (package.json, requirements.txt, pyproject.toml, go.mod, Gemfile) are checked and auto-installed on each agent run.</small>
+          </label>
         </div>
 
         <div class="tab-section" data-sect="web">

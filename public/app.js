@@ -43,6 +43,8 @@
     config: { ollamaBase: '', autoTitle: true, autoMemory: true },
     token: localStorage.getItem('gui_token') || '',
     theme: localStorage.getItem('gui_theme') || 'dark',
+    mode: 'chat',
+    routing: false,
     streaming: false,
     abort: null,
     editingIndex: -1,
@@ -69,8 +71,9 @@
     }
     return res.json();
   }
-  function fetchStream(path, body) { // returns fetch with auth headers
+  function fetchStream(path, body, signal) { // returns fetch with auth headers
     const opt = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+    if (signal) opt.signal = signal;
     if (S.token) opt.headers['Authorization'] = 'Bearer ' + S.token;
     return fetch(path, opt);
   }
@@ -230,8 +233,19 @@
     const sel = $('#modelSelect');
     sel.innerHTML = '';
     if (!S.models.length) { sel.innerHTML = '<option value="">no models</option>'; return; }
-    if (!S.models.some(m => m.name === S.model)) { S.model = S.models[0].name; localStorage.setItem('gui_model', S.model); }
+    if (!S.models.some(m => m.name === S.model)) {
+      const preferred = (S.config.defaultModels || []).find(dm => S.models.some(m => m.name === dm));
+      S.model = preferred || S.models[0].name;
+      localStorage.setItem('gui_model', S.model);
+    }
     S.models.forEach(m => { const o = el('option', '', escapeHtml(m.name)); o.value = m.name; if (m.name === S.model) o.selected = true; sel.appendChild(o); });
+  }
+  function applyDefaultModel() {
+    const defs = S.config.defaultModels || [];
+    const installed = S.models.map(m => m.name);
+    if (S.model && installed.includes(S.model)) return;
+    const pref = defs.find(d => installed.includes(d)) || installed[0];
+    if (pref) { S.model = pref; localStorage.setItem('gui_model', pref); popModelSelect(); }
   }
 
   async function loadConversations() {
@@ -335,25 +349,56 @@
     wrap.dataset.idx = i;
     const av = el('div', 'msg-avatar', m.role === 'user' ? '🙂' : '🦙');
     const body = el('div', 'msg-body');
-    const bubble = el('div', 'bubble msg-content');
-    bubble.innerHTML = m.content ? mdToHtml(m.content) : '';
+    const bubble = el('div', 'bubble msg-content' + (m.type === 'image' ? ' image-bubble' : '') + (m.toolcall || m.toolResult ? ' tool-bubble' : '') + (m.agent ? ' agent-bubble' : '') + (!m.content && m.role === 'user' ? ' placeholder' : ''));
+    if (m.type === 'image') {
+      if (m.images && m.images.length) {
+        const img = el('img', 'gen-img');
+        img.src = m.images[0];
+        img.alt = m.prompt || m.content || 'generated image';
+        bubble.appendChild(img);
+        if (String(m.prompt || '').trim()) bubble.appendChild(el('div', 'img-caption', '🎨 ' + escapeHtml(m.prompt)));
+      } else if (m.generating) {
+        bubble.appendChild(el('div', 'img-pending', '<span class="gen-dot"></span><span class="gen-dot"></span><span class="gen-dot"></span><em>&nbsp;Generating image…</em>'));
+      } else if (m.error) {
+        const e = el('div', 'err-msg', '⚠ ' + escapeHtml(m.error));
+        bubble.appendChild(e);
+      }
+    } else if (m.toolcall) {
+      const c = el('div', 'tool-card ok');
+      c.innerHTML = '<span class="tool-tag">' + escapeHtml(m.toolcall.name) + '</span><code>' + escapeHtml(m.toolcall.arg) + '</code>';
+      bubble.appendChild(c);
+    } else if (m.toolResult) {
+      const d = el('details', 'tool-result ' + (m.ok ? 'ok' : 'err'));
+      d.innerHTML = '<summary>' + (m.ok ? '✓ result' : '✕ error') + '</summary><pre class="tool-out">' + escapeHtml(m.content) + '</pre>';
+      bubble.appendChild(d);
+    } else {
+      if (m.content) bubble.innerHTML = mdToHtml(m.content);
+      else if (m.role === 'user') bubble.textContent = '…';
+    }
     const tools = el('div', 'msg-tools');
     const addTool = (label, fn) => {
       const b = el('button', 'tool-btn', label);
       b.addEventListener('click', fn);
       tools.appendChild(b);
     };
-    if (m.role === 'user') {
+    if (m.type === 'image') {
+      if (m.images && m.images.length) {
+        addTool('⭳ Save', () => saveGeneratedImage(m.images[0]));
+        addTool('↻ Again', () => sendImagePrompt(m.prompt || m.content));
+      }
+    } else if (m.toolcall || m.toolResult) {
+      // tool cards get delete only
+    } else if (m.role === 'user') {
       addTool('✎ Edit', () => editMessage(i));
       addTool('⧉ Copy', () => copyText(m.content));
     } else {
       addTool('↻ Retry', () => regenerate(i));
       addTool('⧉ Copy', () => copyText(m.content));
     }
-    if (m.content) addTool('＋ Insert', () => insertAfter(i));
+    if (m.content && m.type !== 'image') addTool('＋ Insert', () => insertAfter(i));
     addTool('🗑 Del', () => deleteMessagesFrom(i));
     body.appendChild(bubble);
-    if (m.role === 'assistant' && m.stats) body.appendChild(statLine(m.stats));
+    if (m.role === 'assistant' && m.stats && m.type === 'image' && !m.error) body.appendChild(statLine(m.stats));
     wrap.appendChild(av); wrap.appendChild(body); wrap.appendChild(tools);
     return wrap;
   }
@@ -377,7 +422,9 @@
     if (!wrap) return;
     const m = S.conv.messages[idx];
     const b = wrap.querySelector('.msg-content');
-    b.innerHTML = m.content ? mdToHtml(m.content) : '';
+    if (m.type === 'image') return;
+    if (m.content) { b.classList.remove('placeholder'); b.innerHTML = mdToHtml(m.content); }
+    else if (m.role === 'user') { b.classList.add('placeholder'); b.textContent = '…'; }
     if (S.streaming && idx === S.conv.messages.length - 1) b.appendChild(el('span', 'cursor'));
   }
 
@@ -460,7 +507,261 @@
     copyTextAlternative(text).then(ok => toast(ok ? 'Copied' : 'Copy failed', ok ? 'ok' : 'err'));
   }
 
-  // ---------------- params / system ----------------
+  // ---------------- image generation ----------------------------
+  function setGen(label) {
+    $('#genInd').classList.toggle('hidden', !label);
+    if (label) $('#genInd em').textContent = label;
+  }
+
+  function saveGeneratedImage(dataUrl) {
+    const a = el('a');
+    a.href = dataUrl;
+    a.download = 'generated-' + Date.now() + '.png';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => a.remove(), 400);
+    toast('Image saved', 'ok');
+  }
+
+  async function sendImage(opts = {}) {
+    if (S.streaming) return;
+    const prompt = String(opts.prompt == null ? $('#input').value : opts.prompt).trim();
+    if (!prompt) return;
+    const model = S.config.imageModel || '';
+    if (!model) { toast('Set an image model in Settings → General', 'err'); openModal('modalSettings'); return; }
+    if (!S.conv) await ensureConversation();
+    const conv = S.conv;
+    if (!opts.regen) { // regeneration reuses the existing user message
+      conv.messages.push({ role: 'user', content: prompt, createdAt: nowISO() });
+      $('#input').value = ''; autoGrow();
+    }
+    conv.messages.push({ role: 'assistant', type: 'image', prompt, images: [], generating: true, createdAt: nowISO(), stats: null });
+    conv.updatedAt = nowISO();
+    hideEmpty(); renderChat();
+    S.streaming = true;
+    S.abort = new AbortController();
+    setSendingState(true);
+    setGen('Generating image…');
+    const idx = conv.messages.length - 1;
+    try {
+      const res = await fetchStream('/api/image', { prompt, model }, S.abort.signal);
+      if (res.status === 401) { toast('Auth required', 'err'); showLogin(); return; }
+      const j = await res.json();
+      if (!res.ok || !j.image) throw new Error((j && j.error) || 'Image generation failed');
+      conv.messages[idx].images = [j.image];
+      conv.messages[idx].stats = { model: j.model, prompt: j.prompt };
+      conv.messages[idx].generating = false;
+    } catch (e) {
+      conv.messages[idx].generating = false;
+      if (e.name === 'AbortError') { conv.messages[idx].error = 'Cancelled'; toast('Stopped', 'err'); }
+      else { conv.messages[idx].error = e.message; toast(e.message, 'err'); }
+    } finally {
+      S.streaming = false;
+      setSendingState(false);
+      S.abort = null;
+      setGen('');
+      renderChat(); scrollBottom(true);
+      await saveConv();
+      renderConvList();
+    }
+  }
+  async function sendImagePrompt(prompt) {
+    if (S.streaming) return;
+    await sendImage({ prompt: String(prompt || ''), regen: true });
+  }
+
+  // The "brain" — ask the active model whether this is an image request or chat.
+  async function smartSend() {
+    if (S.streaming || S.routing) return;
+    const content = $('#input').value.trim();
+    if (!content) return;
+    S.routing = true;
+    S.abort = new AbortController();
+    setSendingState(true);
+    setGen('Thinking…');
+    let action = 'chat';
+    let aborted = false;
+    try {
+      const r = await fetchStream('/api/route', { text: content, model: S.model || '' }, S.abort.signal);
+      if (r.status === 401) { toast('Auth required', 'err'); showLogin(); }
+      else {
+        const j = await r.json();
+        if (r.ok && j.action === 'image') action = 'image';
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') aborted = true;
+    } finally { S.abort = null; }
+    S.routing = false;
+    setGen('');
+    setSendingState(false);
+    if (aborted) return;
+    if (action === 'image') await sendImage();
+    else if (S.mode === 'agent') await agentSend();
+    else await sendMessage();
+  }
+
+  // ---------------- agent (coding mode) ----------------
+  function setMode(m) {
+    S.mode = m;
+    $('#modeChat').classList.toggle('active', m === 'chat');
+    $('#modeAgent').classList.toggle('active', m === 'agent');
+    metaToolUI();
+    $('#input').placeholder = m === 'agent'
+      ? 'Describe a coding task…  (Enter to send)'
+      : 'Message your model…  (Ctrl+Enter to send)';
+    $('#input').focus();
+  }
+  function metaToolUI() {
+    const ws = S.config.workspace || '';
+    $('#agentChip').textContent = '📁 ' + (ws ? ws.split(/[\\/]/).pop() : 'no workspace');
+    $('#agentChip').classList.toggle('hidden', S.mode !== 'agent');
+  }
+
+  function agentCard(st, ev) {
+    const c = el('div', 'tool-card ' + ev);
+    c.innerHTML = '<span class="tool-tag">' + escapeHtml(st.name) + '</span><code>' + escapeHtml(st.arg) + '</code>';
+    if (ev === 'running') {
+      c.appendChild(el('span', 'tool-badge', 'running…'));
+    } else {
+      const d = el('details');
+      d.innerHTML = '<summary class="tool-summary">' + (st.ok ? '✓ ok' : '✕ error') + (st.code != null && !st.ok ? ' (exit ' + st.code + ')' : '') + '</summary>';
+      const pre = el('pre', 'tool-out', escapeHtml(st.output || ''));
+      d.appendChild(pre);
+      c.appendChild(d);
+    }
+    return c;
+  }
+
+  async function agentSend() {
+    if (S.streaming || S.routing) return;
+    if (!S.config.workspace) { toast('Agent needs a workspace — open Settings → General', 'err'); openModal('modalSettings'); return; }
+    const content = $('#input').value.trim();
+    if (!content) return;
+    const model = (S.conv && S.conv.model) || S.model;
+    if (!model) { toast('Pick a model first', 'err'); return; }
+    if (!S.conv) await ensureConversation();
+    const conv = S.conv;
+    conv.messages.push({ role: 'user', content, createdAt: nowISO() });
+    $('#input').value = ''; autoGrow();
+    conv.messages.push({ role: 'assistant', content: '', agent: true, createdAt: nowISO(), stats: null });
+    conv.updatedAt = nowISO();
+    hideEmpty(); renderChat();
+    const idx = conv.messages.length - 1;
+    const wrap = $('#chat').querySelector('[data-idx="' + idx + '"]');
+    const bodyEl = wrap.querySelector('.msg-body');
+    const b = wrap.querySelector('.msg-content');
+    b.appendChild(el('span', 'cursor'));
+    const stepsBox = el('div', 'agent-steps');
+    bodyEl.appendChild(stepsBox);
+    scrollBottom(true);
+
+    S.streaming = true;
+    S.abort = new AbortController();
+    setSendingState(true);
+    setGen('Coding…');
+    const steps = [];
+    let liveText = '';
+    let lastR = 0;
+    let readErr = null;
+    try {
+      const res = await fetchStream('/api/agent', { model, messages: conv.messages }, S.abort.signal);
+      if (res.status === 401) { toast('Auth required', 'err'); showLogin(); return; }
+      if (!res.ok) { let m = 'Agent request failed'; try { const j = await res.json(); if (j.error) m = String(j.error); } catch {} throw new Error(m); }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, sep); buf = buf.slice(sep + 2);
+          let ev = '';
+          for (const line of block.split('\n')) { if (line.startsWith('event:')) { ev = line.slice(6).trim(); break; } }
+          let j; try { const dl = block.split('\n').find(l => l.startsWith('data:')); j = dl ? JSON.parse(dl.slice(5).trim()) : null; } catch { continue; }
+          if (!j) continue;
+          if (ev === 'delta') {
+            liveText += j.text || '';
+            conv.messages[idx].content = liveText;
+            const nowMs = Date.now();
+            if (nowMs - lastR > 40) { lastR = nowMs; renderBubble(idx); scrollBottom(); }
+          } else if (ev === 'tool') {
+            const st = { name: j.name, arg: j.arg, ok: true, output: '', code: null };
+            steps.push(st);
+            st.card = agentCard(st, 'running');
+            stepsBox.appendChild(st.card);
+          } else if (ev === 'tool-result') {
+            const st = steps.find(s => s.name === j.name);
+            if (st) {
+              st.ok = !!j.ok; st.output = j.output || ''; st.code = j.code;
+              if (st.card) st.card.replaceWith(agentCard(st, st.ok ? 'ok' : 'err'));
+            }
+          } else if (ev === 'deps') {
+            const stTxt = { installed: '✓ installed', failed: '✕ install failed', ok: '✓ ok' }[j.status] || j.status;
+            const d = el('div', 'tool-card tool-card-deps ' + (j.status === 'failed' ? 'err' : j.status === 'installed' ? 'ok' : ''));
+            d.innerHTML = '<span class="tool-tag">deps</span><code>' + escapeHtml(String(j.lang || '') + ' · ' + String(j.manifest || '')) + '</code><span class="tool-summary">' + stTxt + '</span>';
+            if (j.detail) {
+              const dd = el('details');
+              dd.appendChild(el('pre', 'tool-out', escapeHtml(String(j.detail || ''))));
+              d.appendChild(dd);
+            }
+            stepsBox.appendChild(d);
+          } else if (ev === 'done') {
+            if (j.text != null) liveText = j.text;
+            conv.messages[idx].content = liveText;
+          } else if (ev === 'error') {
+            throw new Error(j.message || 'Agent error');
+          }
+        }
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') { conv.messages[idx].content = liveText + (liveText.trim() ? '\n\n_Stopped._' : '_Stopped._'); }
+      else { readErr = e.message; conv.messages[idx].content = liveText; }
+    }
+    const cursor = b.querySelector('.cursor');
+    if (cursor) cursor.remove();
+    stepsBox.remove();
+    S.streaming = false;
+    setSendingState(false);
+    S.abort = null;
+    setGen('');
+
+    if (readErr) {
+      conv.messages[idx].content = liveText || '';
+      b.innerHTML = '<span class="err-msg">⚠ ' + escapeHtml(readErr) + '</span>';
+    } else {
+      const stepsMsgs = [];
+      for (const st of steps) {
+        stepsMsgs.push({ role: 'assistant', content: '', toolcall: { name: st.name, arg: st.arg }, createdAt: nowISO() });
+        stepsMsgs.push({ role: 'user', content: '[Tool result]\n' + (st.output || ''), toolResult: true, ok: st.ok !== false, createdAt: nowISO() });
+      }
+      conv.messages.splice(idx, 1);
+      conv.messages.push(...stepsMsgs);
+      conv.messages.push({ role: 'assistant', content: liveText, agent: true, stats: { model }, createdAt: nowISO() });
+    }
+    renderChat(); scrollBottom(true);
+    await saveConv();
+    renderConvList();
+  }
+
+  function renderRecommendedModels() {
+    const defs = S.config.defaultModels || [];
+    if (!defs.length) return;
+    const installed = new Set(S.models.map(m => m.name));
+    const missing = defs.filter(d => !installed.has(d));
+    if (!missing.length) return;
+    const box = el('div', 'rec-box');
+    box.innerHTML = '<div class="rec-title">⭐ Recommended models (defaults) — not installed</div>';
+    missing.forEach(d => {
+      const row = el('div', 'rec-row');
+      row.innerHTML = '<code>' + escapeHtml(d) + '</code>';
+      const b = el('button', 'btn btn-ghost btn-xs', 'Pull');
+      b.addEventListener('click', () => { $('#pullName').value = d; pullModel(d); });
+      row.appendChild(b);
+      box.appendChild(row);
+    });
+    $('#modelList').appendChild(box);
+  }
   function refreshChatSettingsPanel() {
     applyParamsToPanel(mergeParams(S.conv ? S.conv.params : S.params));
     updateStatsParams();
@@ -516,6 +817,7 @@
     if (mem) msgs.push({ role: 'system', content: mem });
     if (conv.system && conv.system.trim()) msgs.push({ role: 'system', content: conv.system });
     for (const m of conv.messages) {
+      if (m.type === 'image') continue; // skip generated images
       if (!String(m.content || '').trim()) continue; // skip empty placeholders
       msgs.push({ role: m.role, content: m.content });
     }
@@ -611,7 +913,7 @@
     const payload = { model, messages: buildPromptMessages(conv), options: currentOptions() };
     let res;
     try {
-      res = await fetchStream('/api/chat', payload);
+      res = await fetchStream('/api/chat', payload, S.abort.signal);
     } catch (e) {
       if (e.name !== 'AbortError') { appendStreamError(idx, 'Cannot reach server: ' + e.message); }
       finalizeStream(idx);
@@ -723,6 +1025,7 @@
   function renderModelList() {
     const list = $('#modelList');
     list.innerHTML = '';
+    renderRecommendedModels();
     if (!S.models.length) {
       list.appendChild(el('div', 'mem-empty', 'No models found. Pull one below — e.g. <code>qwen2.5</code>, <code>llama3.2</code>, <code>mistral</code>.'));
       return;
@@ -867,8 +1170,12 @@
     $('#setAutoTitle').checked = !!S.config.autoTitle;
     $('#setAutoMemory').checked = !!S.config.autoMemory;
     $('#autoMemory').checked = !!S.config.autoMemory;
+    $('#setImageModel').value = S.config.imageModel || '';
+    $('#setDefaultModels').value = (S.config.defaultModels || []).join(', ');
+    $('#setWorkspace').value = S.config.workspace || '';
     $('#restartNote').classList.add('hidden');
-    $$('.seg-btn').forEach(b => b.classList.toggle('active', b.dataset.themeV === S.theme));
+    $$('.seg-btn').forEach(b => { if (b.dataset.themeV !== undefined) b.classList.toggle('active', b.dataset.themeV === S.theme); });
+    if (S.model) $('#modelChip').textContent = S.model;
   }
   async function saveSettings() {
     const body = {
@@ -879,6 +1186,9 @@
       accessToken: $('#setToken').value.trim(),
       autoTitle: $('#setAutoTitle').checked,
       autoMemory: $('#setAutoMemory').checked,
+      imageModel: $('#setImageModel').value.trim(),
+      defaultModels: $('#setDefaultModels').value.split(',').map(s => s.trim()).filter(Boolean),
+      workspace: $('#setWorkspace').value.trim(),
     };
     try {
       const r = await api('/api/config', { method: 'POST', body });
@@ -886,6 +1196,8 @@
       S.addresses = r.addresses || S.addresses;
       updateUrlPanel();
       if (body.accessToken) { S.token = body.accessToken; localStorage.setItem('gui_token', S.token); S.authRequired = !!body.accessToken; }
+      applyDefaultModel();
+      metaToolUI();
       toast(r.needsRestart ? 'Saved — restarting server…' : 'Settings saved', 'ok');
       closeModals();
       if (r.needsRestart) {
@@ -974,6 +1286,8 @@
     if (first) selectConversation(first.id).catch(() => {});
     else showEmpty();
     updateStatsParams();
+    applyDefaultModel();
+    setMode('chat');
   }
 
   function bindUI() {
@@ -1005,18 +1319,26 @@
       S.theme = e.target.checked ? 'light' : 'dark';
       localStorage.setItem('gui_theme', S.theme);
       applyTheme();
-      $$('.seg-btn').forEach(x => x.classList.toggle('active', x.dataset.themeV === S.theme));
+      $$('.seg-btn').forEach(x => { if (x.dataset.themeV !== undefined) x.classList.toggle('active', x.dataset.themeV === S.theme); });
     });
 
     // composer
-    $('#composer').addEventListener('submit', (e) => { e.preventDefault(); sendMessage(); });
-    $('#btnSend').addEventListener('click', () => sendMessage());
+    $('#composer').addEventListener('submit', (e) => { e.preventDefault(); smartSend(); });
+    $('#btnSend').addEventListener('click', smartSend);
     $('#btnStop').addEventListener('click', stopStream);
     $('#input').addEventListener('input', autoGrow);
     $('#input').addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); sendMessage(); }
+      if (S.mode === 'agent' && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); smartSend(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); smartSend(); }
       if (e.key === 'Escape' && S.streaming) stopStream();
     });
+
+    // mode toggle (chat / agent)
+    $('#modeChat').addEventListener('click', () => setMode('chat'));
+    $('#modeAgent').addEventListener('click', () => setMode('agent'));
+
+    // bottom bar settings button (under the GUI)
+    $('#btnSettingsBottom').addEventListener('click', () => { openModal('modalSettings'); applyConfigToUI(); });
 
     // params / system
     $$('.param input').forEach(inp => inp.addEventListener('change', () => { const p = readParamsFromPanel(); applyParamsToPanel(p); if (S.conv) S.conv.params = p; S.params = p; saveParamsDebounced(); }));
@@ -1046,12 +1368,12 @@
 
     // modals
     $('#modalLayer').addEventListener('click', closeModals);
+    $$('.modal-wrap').forEach(w => w.addEventListener('click', (e) => { if (e.target === w) closeModals(); }));
     $$('[data-close]').forEach(b => b.addEventListener('click', () => { $('#modalLayer').classList.add('hidden'); b.closest('.modal-wrap').classList.add('hidden'); }));
     $$('.modal').forEach(m => m.addEventListener('click', (e) => e.stopPropagation()));
 
     // models modal
     $('#pullForm').addEventListener('submit', (e) => { e.preventDefault(); pullModel($('#pullName').value.trim()); $('#pullName').value = ''; });
-    $('#modalModels').addEventListener('click', (e) => { if (e.target.id === 'modalModels') closeModals(); });
 
     // memory modal
     $('#memoryForm').addEventListener('submit', async (e) => {
@@ -1079,7 +1401,7 @@
       localStorage.setItem('gui_theme', S.theme);
       applyTheme();
       $('#themeToggle').checked = S.theme === 'light';
-      $$('.seg-btn').forEach(x => x.classList.toggle('active', x.dataset.themeV === S.theme));
+      $$('.seg-btn').forEach(x => { if (x.dataset.themeV !== undefined) x.classList.toggle('active', x.dataset.themeV === S.theme); });
       toast('Theme: ' + S.theme, 'ok');
     }));
     $$('#modalSettings .chip[data-host]').forEach(b => b.addEventListener('click', () => {

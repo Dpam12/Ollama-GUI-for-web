@@ -1,9 +1,0 @@
-{
-  "port": 8899,
-  "host": "0.0.0.0",
-  "ollamaBase": "http://127.0.0.1:11434",
-  "accessToken": "",
-  "customUrl": "https://LANOllama.com",
-  "autoTitle": true,
-  "autoMemory": true
-}

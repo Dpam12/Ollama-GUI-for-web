@@ -55,6 +55,13 @@ function isHttpUrl(v) {
   try { const u = new URL(v); return u.protocol === 'http:' || u.protocol === 'https:'; } catch { return false; }
 }
 
+// Default agent workspace — auto-created on demand.
+function defaultWorkspace() {
+  const p = path.join(os.homedir(), 'Ollama_Code_Output');
+  try { fs.mkdirSync(p, { recursive: true }); } catch {}
+  return p;
+}
+
 let config = Object.assign({
   port: 8899,
   host: '127.0.0.1',
@@ -62,9 +69,13 @@ let config = Object.assign({
   accessToken: '',
   customUrl: '',
   autoTitle: true,
-  autoMemory: true
+  autoMemory: true,
+  defaultModels: [],
+  imageModel: '',
+  workspace: ''
 }, loadJSON(CONFIG_FILE, {}));
 if (cli.port) config.port = cli.port;
+if (!config.workspace) { config.workspace = defaultWorkspace(); saveJSON(CONFIG_FILE, config); }
 if (cli.host) config.host = cli.host;
 
 // Sanitize whatever came from disk/CLI so a corrupt config can't break startup.
@@ -75,6 +86,9 @@ if (typeof config.accessToken !== 'string' || config.accessToken.length > 200) c
 if (typeof config.customUrl !== 'string' || config.customUrl.length > 300) config.customUrl = '';
 config.autoTitle = config.autoTitle !== false;
 config.autoMemory = config.autoMemory !== false;
+config.defaultModels = Array.isArray(config.defaultModels) ? config.defaultModels.filter((m) => typeof m === 'string' && m.trim() && m.length <= 200).slice(0, 20) : [];
+config.imageModel = typeof config.imageModel === 'string' && config.imageModel.length <= 200 ? config.imageModel.trim() : '';
+config.workspace = typeof config.workspace === 'string' && config.workspace.length <= 1000 ? config.workspace.trim() : '';
 
 let conversations = loadJSON(CONV_FILE, []);
 let memory = loadJSON(MEM_FILE, { notes: [], learned: [] });
@@ -264,6 +278,406 @@ async function chatStream(req, res, body) {
   res.end();
 }
 
+// --------------------------------------------------------- agent (coding) ----
+// Workspace-scoped coding agent: the model emits <toolcall> XML blocks, the
+// server executes them (cwd = workspace), and the loop repeats until the model
+// answers in plain text.
+
+const { exec } = require('child_process');
+const AGENT_MAX_STEPS = 20;
+const AGENT_TOOL_TIMEOUT = 120000;
+const AGENT_MAX_OUTPUT = 6000;
+
+const TOOLCALL_RE = /<toolcall>\s*([\s\S]*?)<\/toolcall>/i;
+function extractToolcall(buf) {
+  const m = TOOLCALL_RE.exec(buf);
+  if (!m) return null;
+  const inner = m[1];
+  const name = ((inner.match(/<task>\s*([\s\S]*?)\s*<\/task>/i) || [])[1] || (inner.match(/<name>\s*([\s\S]*?)\s*<\/name>/i) || [])[1] || '').trim().toLowerCase();
+  const arg = ((inner.match(/<arg>\s*([\s\S]*?)\s*<\/arg>/i) || [])[1] || (inner.match(/<input>\s*([\s\S]*?)\s*<\/input>/i) || [])[1] || '').trim();
+  if (!name || name.length > 40 || arg.length > 20000) return null;
+  return { name, arg };
+}
+
+function workspacePath(rel) {
+  const root = path.resolve(config.workspace);
+  const abs = path.resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  return abs;
+}
+
+function execTool(cmd) {
+  return new Promise((resolve) => {
+    if (!cmd) return resolve({ ok: false, output: 'Empty command', code: null });
+    exec(cmd, { cwd: config.workspace, shell: '/bin/bash', timeout: AGENT_TOOL_TIMEOUT, maxBuffer: 2 * 1024 * 1024 }, (err, stdout, stderr) => {
+      let out = String(stdout || '') + (stderr ? '\n[stderr]\n' + stderr : '');
+      out = (out.trim() || '(no output)').slice(0, AGENT_MAX_OUTPUT);
+      const code = err ? (typeof err.code === 'number' ? err.code : (err.signal ? 'killed by signal ' + err.signal : 'error')) : 0;
+      resolve({ ok: !err, output: out, code });
+    });
+  });
+}
+
+function readTool(rel) {
+  return new Promise((resolve) => {
+    const abs = workspacePath(rel);
+    if (!abs) return resolve({ ok: false, output: 'Path escapes the workspace: ' + rel });
+    fs.readFile(abs, 'utf8', (err, data) => {
+      if (err) return resolve({ ok: false, output: 'Read failed: ' + err.message });
+      resolve({ ok: true, output: (data || '').slice(0, AGENT_MAX_OUTPUT) });
+    });
+  });
+}
+
+function writeTool(rel) {
+  return new Promise((resolve) => {
+    const nl = rel.indexOf('\n');
+    const fileRel = (nl >= 0 ? rel.slice(0, nl) : rel).trim();
+    const content = nl >= 0 ? rel.slice(nl + 1) : '';
+    const abs = workspacePath(fileRel);
+    if (!abs) return resolve({ ok: false, output: 'Path escapes the workspace: ' + fileRel });
+    fs.mkdir(path.dirname(abs), { recursive: true }, (me) => {
+      if (me) return resolve({ ok: false, output: 'Mkdir failed: ' + me.message });
+      fs.writeFile(abs, content, 'utf8', (err) => {
+        resolve(err ? { ok: false, output: 'Write failed: ' + err.message } : { ok: true, output: 'Wrote ' + fileRel + ' (' + content.length + ' bytes)' });
+      });
+    });
+  });
+}
+
+function listTool(rel) {
+  return new Promise((resolve) => {
+    const abs = workspacePath(rel || '.');
+    if (!abs) return resolve({ ok: false, output: 'Path escapes the workspace: ' + rel });
+    fs.readdir(abs, { withFileTypes: true }, (err, entries) => {
+      if (err) return resolve({ ok: false, output: 'List failed: ' + err.message });
+      resolve({ ok: true, output: entries.map(e => (e.isDirectory() ? e.name + '/' : e.isFile() ? e.name : e.name + ' *')).sort().join('\n') || '(empty)' });
+    });
+  });
+}
+
+async function runAgentTool(tool) {
+  if (tool.name === 'run') return execTool(tool.arg);
+  if (tool.name === 'read') return readTool(tool.arg);
+  if (tool.name === 'write') return writeTool(tool.arg);
+  if (tool.name === 'list') return listTool(tool.arg);
+  return { ok: false, output: 'Unknown tool "' + tool.name + '" — use run, read, write, or list' };
+}
+
+// Runs a shell command in the workspace and captures stdout/stderr. Never throws.
+function runSh(cmd, timeout) {
+  return new Promise((resolve) => {
+    exec(cmd, { cwd: config.workspace, shell: '/bin/bash', timeout: timeout || AGENT_TOOL_TIMEOUT, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+      let out = String(stdout || '') + (stderr ? '\n[stderr]\n' + stderr : '');
+      out = (out.trim() || '(no output)').slice(0, AGENT_MAX_OUTPUT);
+      const code = err ? (typeof err.code === 'number' ? err.code : (err.signal ? 'killed by signal ' + err.signal : 'error')) : 0;
+      resolve({ ok: !err, output: out, code });
+    });
+  });
+}
+
+// Preflight: detect project manifests in the workspace and install missing deps.
+// Returns an array of { lang, manifest, status, detail } reports.
+async function checkDependencies() {
+  const cwd = config.workspace;
+  const reports = [];
+  const has = (f) => fs.existsSync(path.join(cwd, f));
+  const pkgText = (f) => { try { return fs.readFileSync(path.join(cwd, f), 'utf8'); } catch { return ''; } };
+
+  // --- Node.js ---
+  if (has('package.json')) {
+    const pre = await runSh('node -e "try{const p=require(\'./package.json\');console.log(JSON.stringify({deps:!!(p.dependencies&&Object.keys(p.dependencies).length),dev:!!(p.devDependencies&&Object.keys(p.devDependencies).length)}))}catch(e){console.log(\'err\')}"', 30000);
+    const wantsDeps = /"deps":true/.test(pre.output) || /"dev":true/.test(pre.output);
+    if (wantsDeps) {
+      const missing = await runSh('npm ls --depth=0 --json 2>/dev/null; echo "EXIT:$?"', 60000);
+      const npmMissing = /EXIT:[1-9]/.test(missing.output) || /"problems"|node_modules\\"?[^"]*"?: "missing/.test(missing.output);
+      if (npmMissing || !has('node_modules')) {
+        const inst = await runSh('npm install --no-audit --no-fund 2>&1', 300000);
+        reports.push({ lang: 'node', manifest: 'package.json', status: inst.ok ? 'installed' : 'failed', detail: inst.output.slice(0, AGENT_MAX_OUTPUT) });
+      } else {
+        reports.push({ lang: 'node', manifest: 'package.json', status: 'ok', detail: 'dependencies already installed' });
+      }
+    } else {
+      reports.push({ lang: 'node', manifest: 'package.json', status: 'ok', detail: 'no dependencies declared' });
+    }
+  }
+
+  // --- Python ---
+  const pyManifest = has('requirements.txt') ? 'requirements.txt' : (has('pyproject.toml') ? 'pyproject.toml' : '');
+  if (pyManifest) {
+    // Prefer a project-local .venv, else system python; auto-create a .venv if
+    // system pip is blocked (PEP 668 "externally-managed" environments).
+    const whichPy = async () => {
+      for (const p of ['python3', 'python']) { const t = await runSh('command -v ' + p + ' 2>/dev/null', 15000); const line = ((t.output || '').split('\n')[0] || '').trim(); if (line) return line; }
+      return null;
+    };
+    const py = await whichPy();
+    const venv = path.join(cwd, '.venv');
+    const venvPy = path.join(venv, 'bin', 'python');
+    const venvPip = path.join(venv, 'bin', 'pip');
+    const usingVenv = fs.existsSync(venvPy);
+    const pipFor = (which) => (which === 'venv' ? venvPip : (py || 'python3') + ' -m pip');
+    if (py) {
+      let needInstall = false;
+      if (pyManifest === 'requirements.txt') {
+        const wants = pkgText('requirements.txt').split('\n').map((l) => l.split(/[#;]/)[0].trim()).filter(Boolean);
+        const freeze = await runSh(pipFor(usingVenv ? 'venv' : 'sys') + ' freeze 2>/dev/null || echo "(pip unavailable)"', 60000);
+        const frozen = (freeze.output || '').includes('(pip unavailable)') ? '' : (freeze.output || '');
+        if (!frozen) needInstall = wants.length > 0;
+        else {
+          const installed = new Set(frozen.split('\n').map((l) => l.split(/[=<>!~]/)[0].trim().toLowerCase()).filter(Boolean));
+          needInstall = wants.some((line) => {
+            const name = line.split(/[=<>!~[\]@]/)[0].trim().toLowerCase();
+            return name && !installed.has(name);
+          });
+        }
+      } else {
+        needInstall = true;
+      }
+      if (needInstall) {
+        const installCmd = (which) => (pyManifest === 'requirements.txt' ? pipFor(which) + ' install -r requirements.txt 2>&1' : pipFor(which) + ' install -e . 2>&1');
+        let inst = await runSh(installCmd(usingVenv ? 'venv' : 'sys'), 300000);
+        if (!inst.ok && !usingVenv && /externally-managed/.test(inst.output)) {
+          const mk = await runSh(py + ' -m venv ' + venv + ' 2>&1', 120000);
+          if (mk.ok) {
+            inst = await runSh(installCmd('venv'), 300000);
+            reports.push({ lang: 'python', manifest: pyManifest, status: inst.ok ? 'installed' : 'failed', detail: (inst.ok ? 'created .venv and installed packages\n' : 'created .venv but install failed\n') + inst.output.slice(0, AGENT_MAX_OUTPUT) });
+          }
+        } else {
+          reports.push({ lang: 'python', manifest: pyManifest, status: inst.ok ? 'installed' : 'failed', detail: inst.output.slice(0, AGENT_MAX_OUTPUT) });
+        }
+      } else {
+        reports.push({ lang: 'python', manifest: pyManifest, status: 'ok', detail: 'dependencies already installed' });
+      }
+    }
+  }
+
+  // --- Go ---
+  if (has('go.mod') && has('go.sum')) {
+    const pre = await runSh('go list -m all >/dev/null 2>&1; echo "EXIT:$?"', 60000);
+    if (/EXIT:[1-9]/.test(pre.output) || !has('vendor')) {
+      const inst = await runSh('go mod download 2>&1', 300000);
+      reports.push({ lang: 'go', manifest: 'go.mod', status: inst.ok ? 'installed' : 'failed', detail: inst.output.slice(0, AGENT_MAX_OUTPUT) });
+    } else {
+      reports.push({ lang: 'go', manifest: 'go.mod', status: 'ok', detail: 'modules already downloaded' });
+    }
+  }
+
+  // --- Ruby ---
+  if (has('Gemfile')) {
+    const frozen = await runSh('bundle check 2>&1; echo "EXIT:$?"', 60000);
+    if (/EXIT:[1-9]/.test(frozen.output)) {
+      const inst = await runSh('bundle install 2>&1', 300000);
+      reports.push({ lang: 'ruby', manifest: 'Gemfile', status: inst.ok ? 'installed' : 'failed', detail: inst.output.slice(0, AGENT_MAX_OUTPUT) });
+    } else {
+      reports.push({ lang: 'ruby', manifest: 'Gemfile', status: 'ok', detail: 'gems already installed' });
+    }
+  }
+
+  return reports;
+}
+
+function agentSystemPrompt() {
+  return [
+    'You are an expert coding agent operating inside a workspace on the user\'s computer.',
+    'Workspace directory: ' + config.workspace,
+    'The server auto-installs the project\'s dependencies (package.json, requirements.txt, pyproject.toml, go.mod, Gemfile) before your turn when they are missing, so you do not need to run npm install / pip install yourself.',
+    'OS: ' + (process.platform === 'linux' ? 'Linux' : process.platform) + '. Shell commands run with the workspace as their current directory.',
+    'You solve programming tasks by sending tool calls. Each tool call must be your ENTIRE reply for that turn, in this exact shape:',
+    '<toolcall><task>TOOL</task><arg>ARG</arg></toolcall>',
+    'Available tools:',
+    '- run: execute a shell command (cwd = workspace). Use `cd subdir && ...` inside the command when needed. Example: <toolcall><task>run</task><arg>ls -la</arg></toolcall>',
+    '- read: read a file. ARG = path relative to the workspace. Example: <toolcall><task>read</task><arg>src/index.js</arg></toolcall>',
+    '- write: create or overwrite a file. ARG = RELATIVE_PATH, a newline, then the full file content. Example: <toolcall><task>write</task><arg>hello.txt\nHello world!</arg></toolcall>',
+    '- list: list a directory. ARG = path relative to the workspace (default ".").',
+    'Rules:',
+    '1. Send exactly ONE tool call per reply, then wait for the result. Never pack multiple toolcalls into one reply and never add text after the toolcall block.',
+    '2. Continue with more tool calls until the task is done.',
+    '3. When finished, reply with your answer in PLAIN TEXT only — no toolcall block.',
+    '4. Do not nest <tags> inside <arg> content; if file content includes "</arg>", write it as &lt;/arg&gt;.',
+    '5. Verify your work (run/build/test) before concluding.'
+  ].join('\n');
+}
+
+// Streams an upstream chat response; forwards model text that is NOT inside a
+// <toolcall> block (so the raw XML never reaches the UI). Returns the parsed tool.
+async function readAgentStep(upstream, onText, abort) {
+  const dec = new TextDecoder();
+  let buf = '';
+  let raw = '';         // every delta appended, used for tool extraction
+  let pending = '';     // received but not yet committed to the client
+  let inside = false;   // inside <toolcall>...</toolcall> (holds everything)
+  let cand = null;
+  for await (const chunk of upstream.body) {
+    buf += dec.decode(chunk, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+      if (!line) continue;
+      let j; try { j = JSON.parse(line); } catch { continue; }
+      const delta = (j.message && j.message.content) || '';
+      if (!delta) continue;
+      raw += delta;
+      pending += delta;
+      // Forward narrative text, but hold back the last 8 chars in case they are
+      // the start of a <toolcall tag due to arrive in the next delta.
+      while (true) {
+        if (!inside) {
+          const i = pending.indexOf('<toolcall');
+          if (i >= 0) {
+            const pre = pending.slice(0, i);
+            if (pre && !abort.aborted) onText(pre);
+            pending = pending.slice(i);
+            inside = true;
+            continue;
+          }
+          if (pending.length > 8) {
+            const safe = pending.length - 8;
+            const pre = pending.slice(0, safe);
+            if (pre && !abort.aborted) onText(pre);
+            pending = pending.slice(safe);
+          }
+          break;
+        }
+        const j = pending.indexOf('</toolcall>');
+        if (j >= 0) {
+          pending = pending.slice(j + 11);
+          inside = false;
+          continue;
+        }
+        break; // block still incomplete — hold everything
+      }
+      if (!cand) { try { cand = extractToolcall(raw); } catch {} }
+      if (cand) break;
+    }
+    if (cand) break;
+  }
+  if (cand) { abort.abort(); return cand; }
+  if (!inside && pending && !abort.aborted) onText(pending);
+  return null;
+}
+
+function agentHandler(req, res, body) {
+  sseHeaders(res);
+  const ctrl = new AbortController();
+  req.on('close', () => ctrl.abort());
+  if (!body || !Array.isArray(body.messages)) { sseSend(res, 'error', { message: 'Missing messages' }); return res.end(); }
+  const model = String(body.model || '').trim();
+  if (!config.workspace) { sseSend(res, 'error', { message: 'No agent workspace configured — open Settings → General → Agent workspace' }); return res.end(); }
+  if (!model) { sseSend(res, 'error', { message: 'Pick a model first' }); return res.end(); }
+  (async () => {
+    const working = [{ role: 'system', content: agentSystemPrompt() }];
+    working.push(...body.messages
+      .filter(m => m.type !== 'image')
+      .map(m => ({ role: m.role, content: String(m.content || '').trim() }))
+      .filter(m => m.content)
+      .slice(-24));
+    let finalText = '';
+    // Preflight: check + install workspace dependencies, report before the tool loop.
+    try {
+      const reports = await checkDependencies();
+      for (const r of reports) sseSend(res, 'deps', r);
+    } catch (e) { console.error('[deps]', e && e.stack ? e.stack : e); }
+    for (let step = 0; step < AGENT_MAX_STEPS; step++) {
+      const stepAbort = new AbortController();
+      const onAbort = () => stepAbort.abort();
+      ctrl.signal.addEventListener('abort', onAbort, { once: true });
+      let upstream;
+      try {
+        upstream = await ollama('/api/chat', { method: 'POST', body: { model, messages: working, stream: true, options: { temperature: 0.2 } }, signal: stepAbort.signal });
+      } catch (e) { ctrl.signal.removeEventListener('abort', onAbort); sseSend(res, 'error', { message: 'Cannot reach Ollama: ' + e.message }); return res.end(); }
+      if (!upstream.ok) { ctrl.signal.removeEventListener('abort', onAbort); sseSend(res, 'error', { message: await ollamaError(upstream) }); return res.end(); }
+      let stepText = '';
+      const tool = await readAgentStep(upstream, (t) => { finalText += t; stepText += t; sseSend(res, 'delta', { text: t }); }, stepAbort);
+      if (ctrl.signal.aborted || res.destroyed) { sseSend(res, 'done', {}); return res.end(); }
+      if (!tool) {
+        sseSend(res, 'done', { text: finalText });
+        return res.end();
+      }
+      const result = await runAgentTool(tool);
+      working.push({ role: 'assistant', content: stepText + '<toolcall><task>' + tool.name + '</task><arg>' + tool.arg + '</arg></toolcall>' });
+      working.push({ role: 'user', content: '[Tool result for ' + tool.name + ']\n' + result.output + (result.ok ? '' : '  (exit: ' + result.code + ')') });
+      sseSend(res, 'tool', { name: tool.name, arg: tool.arg });
+      sseSend(res, 'tool-result', { name: tool.name, ok: result.ok, output: result.output, code: result.code });
+    }
+    sseSend(res, 'done', { text: finalText, stopped: true });
+    res.end();
+  })().catch((e) => { try { console.error('[agent]', e && e.stack ? e.stack : e); sseSend(res, 'error', { message: 'Agent error' }); res.end(); } catch {} });
+}
+
+// -------------------------------------------------------------- images ------
+
+// Strong, unambiguous "create a visual" cues — fast path, no model call needed.
+const IMG_STRONG = /\b(draw|paint|sketch|generate|create|invent|design|render|animate|imagine)\b.?.?\b(image|picture|photo|selfie|logo|avatar|icon|illustration|diagram|chart|graph|poster|banner|wallpaper|artwork|painting|comic|manga|meme|caricature|cover art|thumbnail)\b/i;
+
+// Ask "the brain" (the active chat model) to classify intent. Outputs a single word.
+async function classifyRoute(text, model) {
+  const sys = 'You are a request router. Decide whether the user is asking you to CREATE A VISUAL — an image, picture, photo, logo, avatar, icon, illustration, diagram, chart, poster, banner, wallpaper, meme, manga, artwork, etc. — that would be generated by an image model.\nReply with exactly one lowercase word, nothing else: "image" or "chat".';
+  const r = await ollama('/api/generate', {
+    method: 'POST',
+    body: {
+      model,
+      prompt: sys + '\n\nUser request: ' + String(text || '').trim(),
+      stream: false,
+      options: { temperature: 0, num_predict: 12 }
+    },
+    signal: AbortSignal.timeout(20000)
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  return /^image/i.test(String(j.response || '').trim()) ? 'image' : 'chat';
+}
+
+function routeRequest(req, res, body) {
+  const text = String(body.text || '').trim();
+  const model = String(body.model || config.imageModel || '').trim().slice(0, 200);
+  const respond = (action) => res.end(JSON.stringify({ action }));
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  if (!text) return respond('chat');
+  if (IMG_STRONG.test(text)) return respond('image');
+  if (!model) return respond('chat');
+  classifyRoute(text, model).then(action => respond(action === null ? 'chat' : action)).catch(() => respond('chat'));
+  return;
+}
+
+async function imageGenerate(req, res, body) {
+  const ctrl = new AbortController();
+  req.on('close', () => ctrl.abort());
+  const prompt = String(body.prompt || '').trim();
+  const model = String(body.model || config.imageModel || '').trim();
+  const size = /^\d{2,5}x\d{2,5}$/.test(String(body.size || '')) ? String(body.size) : '1024x1024';
+  if (!prompt) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'Empty prompt' })); }
+  if (!model) { res.writeHead(422, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: 'No image model configured — set "Image model" in Settings' })); }
+
+  // Primary path: standard /api/generate — Ollama auto-detects image models.
+  let image = null, used = 'generate';
+  try {
+    const r = await ollama('/api/generate', { method: 'POST', body: { model, prompt, stream: false }, signal: ctrl.signal });
+    if (r.ok) {
+      const j = await r.json();
+      if (j.images && j.images.length) image = 'data:image/png;base64,' + j.images[0];
+    }
+  } catch {}
+  // Fallback: OpenAI-compatible images endpoint.
+  if (!image) {
+    used = 'v1';
+    try {
+      const r = await ollama('/v1/images/generations', { method: 'POST', body: { model, prompt, size, response_format: 'b64_json' }, signal: ctrl.signal });
+      if (r.ok) {
+        const j = await r.json();
+        const b = j.data && j.data[0] && j.data[0].b64_json;
+        if (b) image = 'data:image/png;base64,' + b;
+      }
+    } catch {}
+  }
+  if (!image) {
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'Image generation failed — is "' + model + '" an image model?' }));
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ ok: true, image, model, prompt, used }));
+}
+
 // -------------------------------------------------------------- memory ------
 
 const EXTRACT_SYSTEM =
@@ -401,7 +815,7 @@ async function handle(req, res) {
     // ---- config ----
     if (p === '/api/config' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ port: config.port, host: config.host, ollamaBase: config.ollamaBase, customUrl: config.customUrl, autoTitle: config.autoTitle, autoMemory: config.autoMemory }));
+      return res.end(JSON.stringify({ port: config.port, host: config.host, ollamaBase: config.ollamaBase, customUrl: config.customUrl, autoTitle: config.autoTitle, autoMemory: config.autoMemory, defaultModels: config.defaultModels, imageModel: config.imageModel, workspace: config.workspace }));
     }
     if (p === '/api/config' && req.method === 'POST') {
       const prev = { port: config.port, host: config.host };
@@ -424,6 +838,21 @@ async function handle(req, res) {
       }
       if (typeof body.autoTitle === 'boolean') config.autoTitle = body.autoTitle;
       if (typeof body.autoMemory === 'boolean') config.autoMemory = body.autoMemory;
+      if (Array.isArray(body.defaultModels)) config.defaultModels = body.defaultModels.filter((m) => typeof m === 'string' && m.trim() && m.length <= 200).map((m) => m.trim()).slice(0, 20);
+      if (typeof body.imageModel === 'string') config.imageModel = body.imageModel.trim().slice(0, 200);
+      if (typeof body.workspace === 'string') {
+        let v = body.workspace.trim().slice(0, 1000);
+        if (!v) {
+          config.workspace = defaultWorkspace();
+        } else {
+          if (!fs.existsSync(v)) { try { fs.mkdirSync(v, { recursive: true }); } catch {} }
+          if (!fs.existsSync(v)) {
+            res.writeHead(422, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ error: 'Workspace path does not exist and could not be created: ' + v }));
+          }
+          config.workspace = v;
+        }
+      }
       let newPort = body.port !== undefined ? Number(body.port) : config.port;
       let newHost = body.host !== undefined ? String(body.host) : config.host;
       if (!Number.isInteger(newPort) || newPort < 1 || newPort > 65535) {
@@ -440,7 +869,7 @@ async function handle(req, res) {
       saveJSON(CONFIG_FILE, config);
       const addrs = await effectiveAddresses();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, needsRestart, previous: prev, config: { port: config.port, host: config.host, ollamaBase: config.ollamaBase, customUrl: config.customUrl, autoTitle: config.autoTitle, autoMemory: config.autoMemory }, addresses: addrs }));
+      res.end(JSON.stringify({ ok: true, needsRestart, previous: prev, config: { port: config.port, host: config.host, ollamaBase: config.ollamaBase, customUrl: config.customUrl, autoTitle: config.autoTitle, autoMemory: config.autoMemory, defaultModels: config.defaultModels, imageModel: config.imageModel, workspace: config.workspace }, addresses: addrs }));
       if (needsRestart) setTimeout(restartServer, 250);
       return;
     }
@@ -452,7 +881,7 @@ async function handle(req, res) {
       catch (e) { ollamaStatus.error = e.message; }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       const addrs = await effectiveAddresses();
-      return res.end(JSON.stringify({ gui: { ok: true, auth: !!config.accessToken, loopback: isLoopback(config.host) }, ollama: ollamaStatus, config: { ollamaBase: config.ollamaBase, customUrl: config.customUrl, autoTitle: config.autoTitle, autoMemory: config.autoMemory, port: config.port, host: config.host }, addresses: addrs }));
+      return res.end(JSON.stringify({ gui: { ok: true, auth: !!config.accessToken, loopback: isLoopback(config.host) }, ollama: ollamaStatus, config: { ollamaBase: config.ollamaBase, customUrl: config.customUrl, autoTitle: config.autoTitle, autoMemory: config.autoMemory, port: config.port, host: config.host, defaultModels: config.defaultModels, imageModel: config.imageModel, workspace: config.workspace }, addresses: addrs }));
     }
 
     // ---- models ----
@@ -494,6 +923,9 @@ async function handle(req, res) {
       return;
     }
     if (p === '/api/title' && req.method === 'POST') return makeTitle(req, res, body);
+    if (p === '/api/image' && req.method === 'POST') return imageGenerate(req, res, body);
+    if (p === '/api/route' && req.method === 'POST') return routeRequest(req, res, body);
+    if (p === '/api/agent' && req.method === 'POST') return agentHandler(req, res, body);
 
     // ---- conversations ----
     if (p === '/api/conversations' && req.method === 'GET') {
